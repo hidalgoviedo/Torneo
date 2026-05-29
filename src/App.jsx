@@ -1,10 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
-// ─────────────────────────────────────────────
-//  FORMATO DE JUGADORES
-//  Edita este array para cargar tu plantilla.
-//  Campos: name (string), number (number), position ("POR"|"DEF"|"MED"|"DEL")
-// ─────────────────────────────────────────────
 const ROSTER = [
   { name: "Portero",          number: 1,  position: "POR" },
   { name: "Defensa 1",        number: 2,  position: "DEF" },
@@ -19,29 +14,33 @@ const ROSTER = [
   { name: "Delantero 3",      number: 11, position: "DEL" },
 ];
 
-const MATCH_DURATION = 30; // minutos totales de partido
-
+const MATCH_DURATION = 30;
 const posColors = { POR: "#f59e0b", DEF: "#3b82f6", MED: "#10b981", DEL: "#ef4444" };
-
 const initStats = () => ({ goals: 0, assists: 0, yellowCards: 0, redCards: 0, minutesPlayed: 0 });
+const buildPlayers = () => ROSTER.map((p, i) => ({ id: i + 1, ...p, stats: initStats(), totalStats: initStats() }));
 
-const buildPlayers = () =>
-  ROSTER.map((p, i) => ({ id: i + 1, ...p, stats: initStats(), totalStats: initStats() }));
-
-// ── helpers de minutos ──
-// Calcula minutos jugados por un jugador en un partido a partir de sus intervalos
-// intervals: [{in: number, out: number|null}]  (out=null si sigue en campo)
 const calcMinutes = (intervals, matchDuration) =>
   intervals.reduce((acc, seg) => {
     const outAt = seg.out ?? matchDuration;
     return acc + Math.max(0, outAt - seg.in);
   }, 0);
 
+// ── localStorage helpers ──
+const load = (key, fallback) => {
+  try {
+    const v = localStorage.getItem(key);
+    return v ? JSON.parse(v) : fallback;
+  } catch { return fallback; }
+};
+const save = (key, value) => {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+};
+
 export default function App() {
   const [view, setView] = useState("squad");
-  const [players, setPlayers] = useState(buildPlayers);
-  const [matches, setMatches] = useState([]);
-  const [currentMatch, setCurrentMatch] = useState(null);
+  const [players, setPlayers] = useState(() => load("torneo_players", buildPlayers()));
+  const [matches, setMatches] = useState(() => load("torneo_matches", []));
+  const [currentMatch, setCurrentMatch] = useState(() => load("torneo_currentMatch", null));
   const [newMatchForm, setNewMatchForm] = useState({ rival: "", date: "", location: "" });
   const [showNewMatch, setShowNewMatch] = useState(false);
   const [editingPlayer, setEditingPlayer] = useState(null);
@@ -51,20 +50,25 @@ export default function App() {
   const [activeMatchTab, setActiveMatchTab] = useState("lineup");
   const [eventForm, setEventForm] = useState({ type: "goal", playerId: "", minute: "", assistId: "" });
   const [showResetConfirm, setShowResetConfirm] = useState(false);
-
-  // sub form
   const [subForm, setSubForm] = useState({ outId: "", inId: "", minute: "" });
 
-  // ── reset (conserva jugadores) ──
+  // ── persist to localStorage on every change ──
+  useEffect(() => { save("torneo_players", players); }, [players]);
+  useEffect(() => { save("torneo_matches", matches); }, [matches]);
+  useEffect(() => { save("torneo_currentMatch", currentMatch); }, [currentMatch]);
+
   const resetAll = () => {
-    setPlayers((prev) => prev.map((p) => ({ ...p, stats: initStats(), totalStats: initStats() })));
+    const fresh = buildPlayers();
+    setPlayers(fresh);
     setMatches([]);
     setCurrentMatch(null);
     setShowResetConfirm(false);
+    save("torneo_players", fresh);
+    save("torneo_matches", []);
+    save("torneo_currentMatch", null);
     setView("stats");
   };
 
-  // ── squad management ──
   const saveEditPlayer = () => {
     setPlayers((prev) =>
       prev.map((p) =>
@@ -84,7 +88,6 @@ export default function App() {
 
   const removePlayer = (id) => setPlayers((prev) => prev.filter((p) => p.id !== id));
 
-  // ── match management ──
   const liveMatch = matches.find((m) => m.id === currentMatch) || null;
 
   const startMatch = () => {
@@ -97,7 +100,6 @@ export default function App() {
       events: [],
       score: { us: 0, them: 0 },
       status: "live",
-      // lineup: { [playerId]: [{in, out}] }  – tracks all intervals per player
       lineup: {},
     };
     setMatches((prev) => [...prev, match]);
@@ -108,79 +110,54 @@ export default function App() {
     setView("match");
   };
 
-  // Toggle titular al inicio del partido
   const toggleStarter = (playerId) => {
     setMatches((prev) =>
       prev.map((m) => {
         if (m.id !== currentMatch) return m;
         const lineup = { ...m.lineup };
-        if (lineup[playerId]) {
-          delete lineup[playerId];
-        } else {
-          lineup[playerId] = [{ in: 0, out: null }];
-        }
+        if (lineup[playerId]) { delete lineup[playerId]; }
+        else { lineup[playerId] = [{ in: 0, out: null }]; }
         return { ...m, lineup };
       })
     );
   };
 
-  // Registrar sustitución: jugador que sale (outId) en minuto dado, entra (inId)
   const registerSub = () => {
     const { outId, inId, minute } = subForm;
     if (!outId || !inId || !minute) return;
     const min = parseInt(minute);
-
     setMatches((prev) =>
       prev.map((m) => {
         if (m.id !== currentMatch) return m;
         const lineup = JSON.parse(JSON.stringify(m.lineup));
-
-        // Cerrar último intervalo del que sale
         if (lineup[outId]) {
-          const segs = lineup[outId];
-          const last = segs[segs.length - 1];
+          const last = lineup[outId][lineup[outId].length - 1];
           if (last && last.out === null) last.out = min;
         }
-
-        // Abrir nuevo intervalo para el que entra
         if (!lineup[inId]) lineup[inId] = [];
         lineup[inId].push({ in: min, out: null });
-
         const event = {
-          id: Date.now(),
-          type: "sub",
-          outId: parseInt(outId),
-          outName: players.find((p) => p.id === parseInt(outId))?.name,
-          inId: parseInt(inId),
-          inName: players.find((p) => p.id === parseInt(inId))?.name,
+          id: Date.now(), type: "sub",
+          outId: parseInt(outId), outName: players.find((p) => p.id === parseInt(outId))?.name,
+          inId: parseInt(inId), inName: players.find((p) => p.id === parseInt(inId))?.name,
           minute: min,
         };
-
         return { ...m, lineup, events: [...m.events, event] };
       })
     );
-
     setSubForm({ outId: "", inId: "", minute: "" });
   };
 
-  // Registrar evento (gol / tarjeta)
   const addEvent = () => {
     if (eventForm.type !== "goal_them" && !eventForm.playerId) return;
     const player = players.find((p) => p.id === parseInt(eventForm.playerId));
     const assistPlayer = eventForm.assistId ? players.find((p) => p.id === parseInt(eventForm.assistId)) : null;
     const minute = eventForm.minute || "?";
-
     const event = {
-      id: Date.now(),
-      type: eventForm.type,
-      playerId: player?.id || null,
-      playerName: player?.name || "",
-      playerNumber: player?.number || "",
-      minute,
-      assistId: assistPlayer?.id || null,
-      assistName: assistPlayer?.name || null,
+      id: Date.now(), type: eventForm.type,
+      playerId: player?.id || null, playerName: player?.name || "", playerNumber: player?.number || "",
+      minute, assistId: assistPlayer?.id || null, assistName: assistPlayer?.name || null,
     };
-
     setMatches((prev) =>
       prev.map((m) => {
         if (m.id !== currentMatch) return m;
@@ -190,7 +167,6 @@ export default function App() {
         return { ...m, events: [...m.events, event], score: newScore };
       })
     );
-
     setPlayers((prev) =>
       prev.map((p) => {
         let s = { ...p.stats };
@@ -203,24 +179,17 @@ export default function App() {
         return { ...p, stats: s };
       })
     );
-
     setEventForm({ type: "goal", playerId: "", minute: "", assistId: "" });
   };
 
   const finishMatch = () => {
     const m = liveMatch;
     if (!m) return;
-
-    // Calcular minutos de cada jugador en este partido
     const minuteMap = {};
     Object.entries(m.lineup).forEach(([pid, segs]) => {
       minuteMap[parseInt(pid)] = calcMinutes(segs, MATCH_DURATION);
     });
-
-    setMatches((prev) =>
-      prev.map((x) => (x.id === currentMatch ? { ...x, status: "finished", minuteMap } : x))
-    );
-
+    setMatches((prev) => prev.map((x) => (x.id === currentMatch ? { ...x, status: "finished", minuteMap } : x)));
     setPlayers((prev) =>
       prev.map((p) => ({
         ...p,
@@ -234,16 +203,12 @@ export default function App() {
         stats: initStats(),
       }))
     );
-
     setCurrentMatch(null);
     setView("stats");
   };
 
-  // Jugadores en campo ahora mismo
   const onField = liveMatch
-    ? Object.entries(liveMatch.lineup)
-        .filter(([, segs]) => segs[segs.length - 1]?.out === null)
-        .map(([id]) => parseInt(id))
+    ? Object.entries(liveMatch.lineup).filter(([, segs]) => segs[segs.length - 1]?.out === null).map(([id]) => parseInt(id))
     : [];
 
   const sortedByGoals = [...players].sort((a, b) => b.totalStats.goals - a.totalStats.goals);
@@ -285,7 +250,6 @@ export default function App() {
         .player-toggle.on { border-color: #5ee7a0; background: #0d1f16; }
       `}</style>
 
-      {/* HEADER */}
       <div style={{ background: "#0d1220", borderBottom: "1px solid #1e2840", padding: "0 16px" }}>
         <div style={{ maxWidth: 680, margin: "0 auto" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingTop: 14 }}>
@@ -315,7 +279,6 @@ export default function App() {
 
       <div style={{ maxWidth: 680, margin: "0 auto", padding: "20px 16px" }}>
 
-        {/* ══════════════ SQUAD ══════════════ */}
         {view === "squad" && (
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
@@ -388,7 +351,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ══════════════ MATCH ══════════════ */}
         {view === "match" && (
           <div>
             {!liveMatch ? (
@@ -442,9 +404,7 @@ export default function App() {
                 )}
               </div>
             ) : (
-              /* ─── PARTIDO EN VIVO ─── */
               <div>
-                {/* Marcador */}
                 <div className="score-block" style={{ marginBottom: 20 }}>
                   <div style={{ fontSize: 12, color: "#7a8099", letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>
                     {liveMatch.date}{liveMatch.location ? ` · ${liveMatch.location}` : ""}
@@ -463,7 +423,6 @@ export default function App() {
                   <button className="btn btn-red btn-sm" style={{ marginTop: 14 }} onClick={finishMatch}>■ Finalizar Partido</button>
                 </div>
 
-                {/* Tabs */}
                 <div style={{ display: "flex", gap: 4, marginBottom: 16, flexWrap: "wrap" }}>
                   {["lineup", "sub", "events", "register"].map((t) => (
                     <div key={t} className={`tab ${activeMatchTab === t ? "active" : ""}`} onClick={() => setActiveMatchTab(t)}>
@@ -472,11 +431,10 @@ export default function App() {
                   ))}
                 </div>
 
-                {/* ── TAB: TITULARES ── */}
                 {activeMatchTab === "lineup" && (
                   <div className="card" style={{ padding: 16 }}>
                     <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: 1, color: "#5ee7a0", marginBottom: 4, textTransform: "uppercase" }}>Jugadores que empiezan</div>
-                    <div style={{ fontSize: 12, color: "#7a8099", marginBottom: 14 }}>Toca un jugador para marcarlo como titular (entran en el minuto 0).</div>
+                    <div style={{ fontSize: 12, color: "#7a8099", marginBottom: 14 }}>Toca un jugador para marcarlo como titular.</div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                       {players.map((p) => {
                         const isOn = !!liveMatch.lineup[p.id];
@@ -490,50 +448,37 @@ export default function App() {
                         );
                       })}
                     </div>
-                    <div style={{ marginTop: 12, fontSize: 12, color: "#7a8099" }}>
-                      {Object.keys(liveMatch.lineup).length} titular(es) seleccionado(s)
-                    </div>
+                    <div style={{ marginTop: 12, fontSize: 12, color: "#7a8099" }}>{Object.keys(liveMatch.lineup).length} titular(es)</div>
                   </div>
                 )}
 
-                {/* ── TAB: CAMBIOS ── */}
                 {activeMatchTab === "sub" && (
                   <div className="card" style={{ padding: 16 }}>
                     <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: 1, color: "#5ee7a0", marginBottom: 4, textTransform: "uppercase" }}>Registrar Cambio</div>
-                    <div style={{ fontSize: 12, color: "#7a8099", marginBottom: 14 }}>
-                      Los jugadores pueden entrar y salir varias veces. Se registra el tiempo exacto del cambio.
-                    </div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                       <div>
                         <div style={{ fontSize: 11, color: "#7a8099", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>Sale del campo</div>
                         <select value={subForm.outId} onChange={(e) => setSubForm((f) => ({ ...f, outId: e.target.value }))}>
                           <option value="">— Jugador que sale —</option>
-                          {players.filter((p) => onField.includes(p.id)).map((p) => (
-                            <option key={p.id} value={p.id}>#{p.number} {p.name}</option>
-                          ))}
+                          {players.filter((p) => onField.includes(p.id)).map((p) => (<option key={p.id} value={p.id}>#{p.number} {p.name}</option>))}
                         </select>
                       </div>
                       <div>
                         <div style={{ fontSize: 11, color: "#7a8099", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>Entra al campo</div>
                         <select value={subForm.inId} onChange={(e) => setSubForm((f) => ({ ...f, inId: e.target.value }))}>
                           <option value="">— Jugador que entra —</option>
-                          {players.filter((p) => !onField.includes(p.id)).map((p) => (
-                            <option key={p.id} value={p.id}>#{p.number} {p.name}</option>
-                          ))}
+                          {players.filter((p) => !onField.includes(p.id)).map((p) => (<option key={p.id} value={p.id}>#{p.number} {p.name}</option>))}
                         </select>
                       </div>
                       <div>
-                        <div style={{ fontSize: 11, color: "#7a8099", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>Minuto del cambio</div>
+                        <div style={{ fontSize: 11, color: "#7a8099", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>Minuto</div>
                         <input type="number" placeholder="Ej: 15" value={subForm.minute} onChange={(e) => setSubForm((f) => ({ ...f, minute: e.target.value }))} style={{ width: 100 }} />
                       </div>
                       <button className="btn btn-green" onClick={registerSub}>🔄 Confirmar Cambio</button>
                     </div>
-
-
                   </div>
                 )}
 
-                {/* ── TAB: REGISTRAR EVENTO ── */}
                 {activeMatchTab === "register" && (
                   <div className="card" style={{ padding: 16 }}>
                     <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: 1, color: "#5ee7a0", marginBottom: 14, textTransform: "uppercase" }}>Registrar Evento</div>
@@ -542,10 +487,10 @@ export default function App() {
                         <div style={{ fontSize: 11, color: "#7a8099", marginBottom: 6, letterSpacing: 1, textTransform: "uppercase" }}>Tipo de evento</div>
                         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                           {[
-                            { value: "goal",      label: "⚽ Gol (nuestro)", color: "#5ee7a0" },
-                            { value: "goal_them", label: "⚽ Gol (rival)",   color: "#ef4444" },
-                            { value: "yellow",    label: "🟨 Amarilla",      color: "#f59e0b" },
-                            { value: "red",       label: "🟥 Roja",          color: "#ef4444" },
+                            { value: "goal", label: "⚽ Gol (nuestro)", color: "#5ee7a0" },
+                            { value: "goal_them", label: "⚽ Gol (rival)", color: "#ef4444" },
+                            { value: "yellow", label: "🟨 Amarilla", color: "#f59e0b" },
+                            { value: "red", label: "🟥 Roja", color: "#ef4444" },
                           ].map((opt) => (
                             <button key={opt.value} onClick={() => setEventForm((f) => ({ ...f, type: opt.value }))}
                               style={{ background: eventForm.type === opt.value ? opt.color + "22" : "#0d1220", border: `1.5px solid ${eventForm.type === opt.value ? opt.color : "#2a3050"}`, borderRadius: 6, padding: "6px 12px", color: eventForm.type === opt.value ? opt.color : "#7a8099", fontFamily: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.2s" }}>
@@ -556,14 +501,10 @@ export default function App() {
                       </div>
                       {eventForm.type !== "goal_them" && (
                         <div>
-                          <div style={{ fontSize: 11, color: "#7a8099", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>
-                            {eventForm.type === "goal" ? "Goleador" : "Jugador"}
-                          </div>
+                          <div style={{ fontSize: 11, color: "#7a8099", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>{eventForm.type === "goal" ? "Goleador" : "Jugador"}</div>
                           <select value={eventForm.playerId} onChange={(e) => setEventForm((f) => ({ ...f, playerId: e.target.value }))}>
                             <option value="">— Seleccionar jugador —</option>
-                            {players.map((p) => (
-                              <option key={p.id} value={p.id}>#{p.number} {p.name} ({p.position})</option>
-                            ))}
+                            {players.map((p) => (<option key={p.id} value={p.id}>#{p.number} {p.name} ({p.position})</option>))}
                           </select>
                         </div>
                       )}
@@ -572,9 +513,7 @@ export default function App() {
                           <div style={{ fontSize: 11, color: "#7a8099", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>Asistencia (opcional)</div>
                           <select value={eventForm.assistId} onChange={(e) => setEventForm((f) => ({ ...f, assistId: e.target.value }))}>
                             <option value="">— Sin asistencia —</option>
-                            {players.filter((p) => p.id !== parseInt(eventForm.playerId)).map((p) => (
-                              <option key={p.id} value={p.id}>#{p.number} {p.name}</option>
-                            ))}
+                            {players.filter((p) => p.id !== parseInt(eventForm.playerId)).map((p) => (<option key={p.id} value={p.id}>#{p.number} {p.name}</option>))}
                           </select>
                         </div>
                       )}
@@ -587,7 +526,6 @@ export default function App() {
                   </div>
                 )}
 
-                {/* ── TAB: EVENTOS ── */}
                 {activeMatchTab === "events" && (
                   <div className="card" style={{ padding: 16 }}>
                     <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: 1, color: "#fff", marginBottom: 12, textTransform: "uppercase" }}>Eventos del Partido</div>
@@ -595,24 +533,14 @@ export default function App() {
                       <div style={{ textAlign: "center", padding: "24px 0", color: "#7a8099", fontSize: 13 }}>Sin eventos registrados aún</div>
                     ) : (
                       [...liveMatch.events].reverse().map((ev) => {
-                        const cfgMap = {
-                          goal:      { icon: "⚽", color: "#5ee7a0" },
-                          goal_them: { icon: "⚽", color: "#ef4444" },
-                          yellow:    { icon: "🟨", color: "#f59e0b" },
-                          red:       { icon: "🟥", color: "#ef4444" },
-                          sub:       { icon: "🔄", color: "#a78bfa" },
-                        };
+                        const cfgMap = { goal: { icon: "⚽", color: "#5ee7a0" }, goal_them: { icon: "⚽", color: "#ef4444" }, yellow: { icon: "🟨", color: "#f59e0b" }, red: { icon: "🟥", color: "#ef4444" }, sub: { icon: "🔄", color: "#a78bfa" } };
                         const cfg = cfgMap[ev.type] || { icon: "•", color: "#7a8099" };
                         return (
                           <div key={ev.id} className="event-chip" style={{ borderLeftColor: cfg.color }}>
                             <span style={{ fontSize: 18 }}>{cfg.icon}</span>
                             <div style={{ flex: 1 }}>
                               {ev.type === "sub" ? (
-                                <span style={{ color: "#e8eaf0" }}>
-                                  <span style={{ color: "#ef4444" }}>▼ {ev.outName}</span>
-                                  {" / "}
-                                  <span style={{ color: "#5ee7a0" }}>▲ {ev.inName}</span>
-                                </span>
+                                <span style={{ color: "#e8eaf0" }}><span style={{ color: "#ef4444" }}>▼ {ev.outName}</span>{" / "}<span style={{ color: "#5ee7a0" }}>▲ {ev.inName}</span></span>
                               ) : (
                                 <span style={{ fontWeight: 600, color: "#e8eaf0" }}>
                                   {ev.type === "goal_them" ? liveMatch.rival : ev.playerName}
@@ -632,24 +560,17 @@ export default function App() {
           </div>
         )}
 
-        {/* ══════════════ STATS ══════════════ */}
         {view === "stats" && (
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <div style={{ fontFamily: "'Barlow Condensed'", fontSize: 18, fontWeight: 700, color: "#fff", textTransform: "uppercase", letterSpacing: 1 }}>
-                Estadísticas del Torneo
-              </div>
-              <button className="btn btn-outline btn-sm" style={{ color: "#ef4444", borderColor: "#ef444455" }} onClick={() => setShowResetConfirm(true)}>
-                🗑 Reiniciar
-              </button>
+              <div style={{ fontFamily: "'Barlow Condensed'", fontSize: 18, fontWeight: 700, color: "#fff", textTransform: "uppercase", letterSpacing: 1 }}>Estadísticas del Torneo</div>
+              <button className="btn btn-outline btn-sm" style={{ color: "#ef4444", borderColor: "#ef444455" }} onClick={() => setShowResetConfirm(true)}>🗑 Reiniciar</button>
             </div>
 
             {showResetConfirm && (
               <div className="card" style={{ padding: 16, marginBottom: 16, border: "1px solid #ef444455", background: "#1e0a0a" }}>
                 <div style={{ fontSize: 14, fontWeight: 600, color: "#fff", marginBottom: 6 }}>¿Reiniciar todas las estadísticas?</div>
-                <div style={{ fontSize: 13, color: "#7a8099", marginBottom: 14 }}>
-                  Se borrarán todos los partidos y stats acumuladas. Los jugadores inscritos se conservarán intactos.
-                </div>
+                <div style={{ fontSize: 13, color: "#7a8099", marginBottom: 14 }}>Se borrarán todos los partidos y stats. Los jugadores se conservarán.</div>
                 <div style={{ display: "flex", gap: 8 }}>
                   <button className="btn btn-red btn-sm" onClick={resetAll}>Sí, reiniciar</button>
                   <button className="btn btn-outline btn-sm" onClick={() => setShowResetConfirm(false)}>Cancelar</button>
@@ -657,12 +578,11 @@ export default function App() {
               </div>
             )}
 
-            {/* Resumen */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 20 }}>
               {[
                 { label: "Partidos", value: matches.filter((m) => m.status === "finished").length, icon: "🏟️" },
-                { label: "Goles",    value: players.reduce((s, p) => s + p.totalStats.goals, 0),   icon: "⚽" },
-                { label: "Asist.",   value: players.reduce((s, p) => s + p.totalStats.assists, 0),  icon: "🅰️" },
+                { label: "Goles", value: players.reduce((s, p) => s + p.totalStats.goals, 0), icon: "⚽" },
+                { label: "Asist.", value: players.reduce((s, p) => s + p.totalStats.assists, 0), icon: "🅰️" },
               ].map((c) => (
                 <div key={c.label} className="card" style={{ padding: "14px 12px", textAlign: "center" }}>
                   <div style={{ fontSize: 24 }}>{c.icon}</div>
@@ -672,11 +592,8 @@ export default function App() {
               ))}
             </div>
 
-            {/* Tabla jugadores */}
             <div className="card" style={{ marginBottom: 16 }}>
-              <div style={{ padding: "12px 16px", background: "#0d1220", fontSize: 12, fontWeight: 700, letterSpacing: 2, textTransform: "uppercase", color: "#5ee7a0", borderBottom: "1px solid #1e2840" }}>
-                Tabla de Jugadores
-              </div>
+              <div style={{ padding: "12px 16px", background: "#0d1220", fontSize: 12, fontWeight: 700, letterSpacing: 2, textTransform: "uppercase", color: "#5ee7a0", borderBottom: "1px solid #1e2840" }}>Tabla de Jugadores</div>
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
@@ -700,10 +617,10 @@ export default function App() {
                           </div>
                         </td>
                         {[
-                          { v: p.totalStats.goals,       c: "#5ee7a0" },
-                          { v: p.totalStats.assists,     c: "#10b981" },
+                          { v: p.totalStats.goals, c: "#5ee7a0" },
+                          { v: p.totalStats.assists, c: "#10b981" },
                           { v: p.totalStats.yellowCards, c: "#f59e0b" },
-                          { v: p.totalStats.redCards,    c: "#ef4444" },
+                          { v: p.totalStats.redCards, c: "#ef4444" },
                           { v: p.totalStats.minutesPlayed, c: "#a78bfa", fmt: (x) => `${x}'` },
                         ].map(({ v, c, fmt }, idx) => (
                           <td key={idx} style={{ padding: "9px 10px", textAlign: "center" }}>
@@ -719,12 +636,9 @@ export default function App() {
               </div>
             </div>
 
-            {/* Historial */}
             {matches.length > 0 && (
               <div className="card">
-                <div style={{ padding: "12px 16px", background: "#0d1220", fontSize: 12, fontWeight: 700, letterSpacing: 2, textTransform: "uppercase", color: "#5ee7a0", borderBottom: "1px solid #1e2840" }}>
-                  Historial de Partidos
-                </div>
+                <div style={{ padding: "12px 16px", background: "#0d1220", fontSize: 12, fontWeight: 700, letterSpacing: 2, textTransform: "uppercase", color: "#5ee7a0", borderBottom: "1px solid #1e2840" }}>Historial de Partidos</div>
                 {matches.map((m) => (
                   <div key={m.id} style={{ padding: "12px 16px", borderBottom: "1px solid #1a2235", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <div>
